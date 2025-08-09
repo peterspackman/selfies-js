@@ -1,0 +1,53 @@
+{
+  "name": "@peterspackman/selfies",
+  "version": "0.1.0",
+  "description": "SELFIES: a robust representation of semantically constrained graphs with an example application in chemistry",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test --test-concurrency=1 dist/tests/**/*.test.js",
+    "test:dev": "npm run build && node --test dist/tests/**/*.test.js",
+    "lint": "eslint src/**/*.ts",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "selfies",
+    "chemistry",
+    "molecules",
+    "smiles",
+    "graph",
+    "representation",
+    "machine-learning",
+    "cheminformatics",
+    "molecular-generation",
+    "drug-discovery"
+  ],
+  "author": "Peter Spackman",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/peterspackman/selfies-js.git"
+  },
+  "bugs": {
+    "url": "https://github.com/peterspackman/selfies-js/issues"
+  },
+  "homepage": "https://github.com/peterspackman/selfies-js#readme",
+  "devDependencies": {
+    "@eslint/js": "^9.33.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.39.0",
+    "@typescript-eslint/parser": "^8.39.0",
+    "eslint": "^8.40.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.39.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
