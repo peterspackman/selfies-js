@@ -10,8 +10,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && node --test --test-concurrency=1 dist/tests/**/*.test.js",
-    "test:dev": "npm run build && node --test dist/tests/**/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 dist/tests/selfies-utils.test.js dist/tests/selfies.test.js",
+    "test:dev": "npm run build && node --test dist/tests/selfies-utils.test.js dist/tests/selfies.test.js",
     "lint": "eslint src/**/*.ts",
     "prepare": "npm run build"
   },
@@ -48,6 +48,6 @@
     "typescript-eslint": "^8.39.0"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=20.0.0"
   }
 }
