@@ -4,7 +4,7 @@
 
 import { MolecularGraph, Atom } from '../mol-graph.js';
 import { EncoderError } from '../exceptions.js';
-import { ORGANIC_SUBSET } from '../constants.js';
+import { ORGANIC_SUBSET, AROMATIC_SUBSET } from '../constants.js';
 
 export function smilesToMol(smiles: string, attributable: boolean = false): MolecularGraph {
   if (!smiles || typeof smiles !== 'string') {
@@ -96,7 +96,12 @@ function parseFragment(smiles: string, mol: MolecularGraph): void {
           const atom2 = currentAtom;
           
           // Use the bond order from either the opening or closing
-          const finalBondOrder = Math.max(bondOrder, ring.bondOrder);
+          let finalBondOrder = Math.max(bondOrder, ring.bondOrder);
+          
+          // Handle implicit aromatic bonds for rings (e.g., c1ccccc1)
+          if (finalBondOrder === 1 && atom1.isAromatic && atom2.isAromatic) {
+            finalBondOrder = 1.5; // Aromatic bond
+          }
           
           if (atom1.index !== null && atom2.index !== null) {
             mol.addRingBond(
@@ -132,7 +137,14 @@ function parseFragment(smiles: string, mol: MolecularGraph): void {
     if (!isFirstAtom && currentAtom) {
       const src = currentAtom.index!;
       const dst = addedAtom.index!;
-      mol.addBond(Math.min(src, dst), Math.max(src, dst), bondOrder, stereo);
+      
+      // Check if both atoms are aromatic and no explicit bond order given
+      let actualBondOrder = bondOrder;
+      if (bondOrder === 1 && currentAtom.isAromatic && addedAtom.isAromatic) {
+        actualBondOrder = 1.5; // Aromatic bond
+      }
+      
+      mol.addBond(Math.min(src, dst), Math.max(src, dst), actualBondOrder, stereo);
     }
 
     currentAtom = addedAtom;
@@ -179,7 +191,7 @@ function parseAtom(smiles: string, start: number): [Atom, number] {
     }
   }
 
-  if (!element || (!ORGANIC_SUBSET.has(element) && !['Cl', 'Br'].includes(element))) {
+  if (!element || (!ORGANIC_SUBSET.has(element.toUpperCase()) && !['Cl', 'Br'].includes(element) && !AROMATIC_SUBSET.has(element))) {
     throw new EncoderError(`Invalid element: ${element}`);
   }
 

@@ -7,6 +7,7 @@ import { MolecularGraph, Atom, DirectedBond } from './mol-graph.js';
 import { smilesToMol } from './utils/smiles-parser.js';
 import { getSelfiesFromIndex } from './grammar-rules.js';
 import { getBondingCapacity } from './bond-constraints.js';
+import { atomToSmiles, bondToSmiles } from './utils/smiles-utils.js';
 import type { AttributionOptions, EncoderResult, AttributionMap, TokenAttribution } from './types.js';
 
 /**
@@ -71,11 +72,10 @@ export function encoder(smiles: string, options?: AttributionOptions): EncoderRe
     // Check bond constraints in strict mode
     checkBondConstraints(mol, smiles);
 
-    // Handle chirality inversion for ring bonds (simplified)
+    // Handle chirality inversion for ring bonds
     for (const atom of mol.getAtoms()) {
-      if (atom.chirality && mol.hasOutRingBond(atom.index!)) {
-        // Simplified chirality handling - would need full implementation
-        // atom.invertChirality();
+      if (atom.chirality && mol.hasOutRingBond(atom.index!) && shouldInvertChirality(mol, atom)) {
+        atom.invertChirality();
       }
     }
 
@@ -85,14 +85,9 @@ export function encoder(smiles: string, options?: AttributionOptions): EncoderRe
     let attributionIndex = 0;
 
     for (const rootIdx of mol.getRoots()) {
-      const [selfiesFrag, fragAttribution] = fragmentToSelfies(
-        mol, null, rootIdx, [], attributionIndex
-      );
-      attributionIndex += selfiesFrag.length; // Rough estimate
-      fragments.push(selfiesFrag);
-      if (options?.attribute && fragAttribution) {
-        attributionMaps.push(...fragAttribution);
-      }
+      const derived = fragmentToSelfies(mol, null, rootIdx, attributionMaps, attributionIndex);
+      attributionIndex += derived.length;
+      fragments.push(derived.join(''));
     }
 
     const selfiesString = fragments.join('.');
@@ -133,131 +128,170 @@ function checkBondConstraints(mol: MolecularGraph, smiles: string): void {
   }
 }
 
+function shouldInvertChirality(mol: MolecularGraph, atom: Atom): boolean {
+  if (!atom.index) return false;
+  
+  const outBonds = mol.getOutDirBonds(atom.index);
+
+  // Partition bonds into 3 categories:
+  // 1. rings whose right number are bonded to this atom (e.g. ...1...X1)
+  // 2. rings whose left number are bonded to this atom (e.g. X1...1...)
+  // 3. branches and other (e.g. X(...)...)
+  const partition: number[][] = [[], [], []];
+  
+  for (let i = 0; i < outBonds.length; i++) {
+    const bond = outBonds[i];
+    if (!bond.ringBond) {
+      partition[2].push(i);
+    } else if (bond.src < bond.dst) {
+      partition[1].push(i);
+    } else {
+      partition[0].push(i);
+    }
+  }
+
+  // Sort partition[1] by destination atom index for consistent ordering
+  partition[1].sort((a, b) => outBonds[a].dst - outBonds[b].dst);
+
+  // Construct permutation: partition[0] + partition[1] + partition[2]
+  const perm = [...partition[0], ...partition[1], ...partition[2]];
+  
+  // Count inversions in the permutation
+  let count = 0;
+  for (let i = 0; i < perm.length; i++) {
+    for (let j = i + 1; j < perm.length; j++) {
+      if (perm[i] > perm[j]) {
+        count++;
+      }
+    }
+  }
+  
+  // If odd number of inversions, should invert chirality
+  return count % 2 !== 0;
+}
+
 function fragmentToSelfies(
   mol: MolecularGraph,
-  fromBond: DirectedBond | null,
-  atomIdx: number,
+  bondIntoCurr: DirectedBond | null,
+  curr: number,
   attributionMaps: AttributionMap,
-  attributionIndex: number,
-  visited: Set<number> = new Set()
-): [string, TokenAttribution[] | null] {
-  if (visited.has(atomIdx)) {
-    // Handle ring closure - simplified
-    return ['', null];
-  }
-
-  visited.add(atomIdx);
-  const atom = mol.getAtom(atomIdx);
+  attributionIndex: number
+): string[] {
+  const derived: string[] = [];
   
-  // Convert atom to SELFIES
-  let selfiesStr = atomToSelfies(atom, fromBond);
+  let currentBond = bondIntoCurr;
+  let currentAtom = curr;
   
-  const attributions: TokenAttribution[] = [];
-  
-  // Add attribution for the atom
-  const atomAttribution = mol.getAttribution(atom);
-  if (atomAttribution) {
-    attributions.push({
-      token: selfiesStr,
-      attribution: atomAttribution
-    });
-  }
-
-  // Process outgoing bonds
-  const outBonds = mol.getOutDirBonds(atomIdx);
-  let branchCount = 0;
-
-  for (const bond of outBonds) {
-    if (bond.src !== atomIdx) continue; // Only process outgoing bonds
-    if (visited.has(bond.dst)) {
-      // Ring closure - add ring symbol
-      const ringNum = 1; // Simplified ring numbering
-      const ringSymbol = getRingSymbol(bond.order, ringNum);
-      selfiesStr += ringSymbol;
-      continue;
+  while (true) {
+    const atom = mol.getAtom(currentAtom);
+    const token = atomToSelfies(currentBond, atom);
+    derived.push(token);
+    
+    // Add attribution if needed
+    const atomAttribution = mol.getAttribution(atom);
+    if (atomAttribution) {
+      attributionMaps.push({
+        token,
+        attribution: atomAttribution
+      });
     }
-
-    // Process child atom
-    const [childStr, childAttribution] = fragmentToSelfies(
-      mol, bond, bond.dst, [], attributionIndex, visited
-    );
-
-    if (branchCount > 0) {
-      // Add branch symbols for multiple children
-      const branchSymbol = getBranchSymbol(branchCount);
-      const branchIndex = getSelfiesFromIndex(childStr.length - 1); // Simplified index
-      selfiesStr += branchSymbol + branchIndex.join('') + childStr;
-    } else {
-      selfiesStr += childStr;
-    }
-
-    if (childAttribution) {
-      attributions.push(...childAttribution);
-    }
-
-    branchCount++;
-  }
-
-  return [selfiesStr, attributions.length > 0 ? attributions : null];
-}
-
-function atomToSelfies(atom: Atom, fromBond: DirectedBond | null): string {
-  let symbol = '[';
-  
-  // Add bond prefix if coming from a bond
-  if (fromBond) {
-    if (fromBond.order === 2) symbol += '=';
-    else if (fromBond.order === 3) symbol += '#';
-    else if (fromBond.stereo === '/') symbol += '/';
-    else if (fromBond.stereo === '\\') symbol += '\\';
-  }
-
-  // Add isotope
-  if (atom.isotope !== null) {
-    symbol += atom.isotope.toString();
-  }
-
-  // Add element
-  symbol += atom.element;
-
-  // Add chirality
-  if (atom.chirality) {
-    symbol += atom.chirality;
-  }
-
-  // Add H count
-  if (atom.hCount !== null && atom.hCount > 0) {
-    symbol += 'H';
-    if (atom.hCount > 1) {
-      symbol += atom.hCount.toString();
-    }
-  }
-
-  // Add charge
-  if (atom.charge !== 0) {
-    if (atom.charge > 0) {
-      symbol += '+';
-      if (atom.charge > 1) {
-        symbol += atom.charge.toString();
+    
+    const outBonds = mol.getOutDirBonds(currentAtom);
+    
+    for (let i = 0; i < outBonds.length; i++) {
+      const bond = outBonds[i];
+      
+      if (bond.ringBond) {
+        // Only process ring closures (not openings)
+        if (bond.src < bond.dst) {
+          continue;
+        }
+        
+        // Get the reverse bond
+        const revBond = mol.getDirBond(bond.dst, bond.src);
+        const ringLen = bond.src - bond.dst;
+        const qAsSymbols = getSelfiesFromIndex(ringLen - 1);
+        const ringSymbol = `[${ringBondsToSelfies(revBond, bond)}Ring${qAsSymbols.length}]`;
+        
+        derived.push(ringSymbol);
+        for (const symbol of qAsSymbols) {
+          derived.push(symbol);
+        }
+        
+        // Add attribution for ring
+        const bondAttribution = mol.getAttribution(bond);
+        if (bondAttribution) {
+          attributionMaps.push({
+            token: ringSymbol,
+            attribution: bondAttribution
+          });
+        }
+        
+      } else if (i === outBonds.length - 1) {
+        // Last bond - continue chain
+        currentBond = bond;
+        currentAtom = bond.dst;
+        
+      } else {
+        // Branch
+        const branch = fragmentToSelfies(mol, bond, bond.dst, attributionMaps, derived.length);
+        const qAsSymbols = getSelfiesFromIndex(branch.length - 1);
+        const branchSymbol = `[${bondToSelfies(bond, false)}Branch${qAsSymbols.length}]`;
+        
+        derived.push(branchSymbol);
+        for (const symbol of qAsSymbols) {
+          derived.push(symbol);
+        }
+        derived.push(...branch);
+        
+        // Add attribution for branch
+        const bondAttribution = mol.getAttribution(bond);
+        if (bondAttribution) {
+          attributionMaps.push({
+            token: branchSymbol,
+            attribution: bondAttribution
+          });
+        }
       }
-    } else {
-      symbol += atom.charge.toString();
+    }
+    
+    // End of chain
+    if (outBonds.length === 0 || outBonds[outBonds.length - 1].ringBond) {
+      break;
     }
   }
-
-  symbol += ']';
-  return symbol;
-}
-
-function getBranchSymbol(branchType: number): string {
-  return `[Branch${Math.min(branchType, 3)}]`;
-}
-
-function getRingSymbol(bondOrder: number, ringNum: number): string {
-  let symbol = '[';
-  if (bondOrder === 2) symbol += '=';
-  else if (bondOrder === 3) symbol += '#';
   
-  symbol += `Ring${Math.min(ringNum, 3)}]`;
-  return symbol;
+  return derived;
+}
+
+function ringBondsToSelfies(lBond: DirectedBond, rBond: DirectedBond): string {
+  // Assert that bond orders match
+  if (lBond.order !== rBond.order) {
+    throw new Error('Ring bond orders must match');
+  }
+  
+  if (lBond.order !== 1 || (lBond.stereo === null && rBond.stereo === null)) {
+    return bondToSelfies(lBond, false);
+  } else {
+    // Handle stereo bonds
+    const bondChar = (lBond.stereo || '-') + (rBond.stereo || '-');
+    return bondChar;
+  }
+}
+
+function atomToSelfies(bond: DirectedBond | null, atom: Atom): string {
+  // Assert atom is not aromatic (should be kekulized)
+  if (atom.isAromatic) {
+    throw new Error('Atom should not be aromatic after kekulization');
+  }
+  
+  const bondChar = bond ? bondToSelfies(bond, true) : '';
+  return `[${bondChar}${atomToSmiles(atom, false)}]`;
+}
+
+function bondToSelfies(bond: DirectedBond, showStereo: boolean = true): string {
+  if (!showStereo && bond.order === 1) {
+    return '';
+  }
+  return bondToSmiles(bond);
 }

@@ -28,6 +28,11 @@ export interface AttributionOptions {
   attribute?: boolean;
 }
 
+// Options for decoding including backward compatibility
+export interface DecoderOptions extends AttributionOptions {
+  compatible?: boolean;
+}
+
 // Return types for functions with attribution
 export type EncoderResult = string | [string, AttributionMap];
 export type DecoderResult = string | [string, AttributionMap];

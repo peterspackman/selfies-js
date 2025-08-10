@@ -40,7 +40,7 @@ export function molToSmiles(
   for (const rootIdx of mol.getRoots()) {
     const visited = new Set<number>();
     const ringContext = new RingContext();
-    const [smilesFrag, fragAttribution] = atomToSmiles(
+    const [smilesFrag, fragAttribution] = moleculeAtomToSmiles(
       mol, rootIdx, visited, attribute, undefined, ringContext
     );
     fragments.push(smilesFrag);
@@ -58,7 +58,7 @@ export function molToSmiles(
   return smilesString;
 }
 
-function atomToSmiles(
+function moleculeAtomToSmiles(
   mol: MolecularGraph,
   atomIdx: number,
   visited: Set<number>,
@@ -91,7 +91,6 @@ function atomToSmiles(
   // Process outgoing bonds
   let smilesStr = atomStr;
   const outBonds = mol.getOutDirBonds(atomIdx);
-  let branchCount = 0;
   
   // Separate regular bonds from ring bonds
   const regularBonds: DirectedBond[] = [];
@@ -111,21 +110,23 @@ function atomToSmiles(
   for (const bond of ringBonds) {
     if (ringContext) {
       const ringNumber = ringContext.getRingNumber(atomIdx, bond.dst);
-      if (bond.order === 2) smilesStr += '=';
-      else if (bond.order === 3) smilesStr += '#';
+      // Ring closure numbers should not have bond order prefixes
+      // Bond order is expressed through the bond path, not the closure
       smilesStr += ringNumber.toString();
     }
   }
   
   // Process regular bonds to unvisited atoms
-  for (const bond of regularBonds) {
-    const [bondStr, bondAttribution] = bondToSmiles(bond, attribute ? mol.getAttribution(bond) : null);
-    const [childStr, childAttribution] = atomToSmiles(mol, bond.dst, visited, attribute, bond, ringContext);
+  for (let bondIndex = 0; bondIndex < regularBonds.length; bondIndex++) {
+    const bond = regularBonds[bondIndex];
+    const [bondStr, bondAttribution] = moleculeBondToSmiles(bond, attribute ? mol.getAttribution(bond) : null);
+    const [childStr, childAttribution] = moleculeAtomToSmiles(mol, bond.dst, visited, attribute, bond, ringContext);
     
     let bondFragment = bondStr + childStr;
     
-    // Add parentheses for branching
-    if (branchCount > 0) {
+    // Add parentheses for branching - PYTHON'S "LAST BOND WINS" STRATEGY
+    // All bonds except the last one are treated as branches
+    if (bondIndex < regularBonds.length - 1) {
       bondFragment = '(' + bondFragment + ')';
     }
     
@@ -135,8 +136,6 @@ function atomToSmiles(
       if (bondAttribution) attributions.push(bondAttribution);
       if (childAttribution) attributions.push(...childAttribution);
     }
-    
-    branchCount++;
   }
 
   return [smilesStr, attribute ? attributions : null];
@@ -175,9 +174,7 @@ function formatAtomForSmiles(atom: Atom): string {
   if (atom.charge !== 0) {
     if (atom.charge > 0) {
       result += '+';
-      if (atom.charge > 1) {
-        result += atom.charge.toString();
-      }
+      result += atom.charge.toString();
     } else {
       result += atom.charge.toString();
     }
@@ -187,7 +184,7 @@ function formatAtomForSmiles(atom: Atom): string {
   return result;
 }
 
-function bondToSmiles(
+function moleculeBondToSmiles(
   bond: DirectedBond,
   attribution: Attribution[] | null
 ): [string, TokenAttribution | null] {
@@ -219,6 +216,61 @@ function bondToSmiles(
 }
 
 // Simple SMILES validation
+/**
+ * Convert atom to SMILES representation (for encoder)
+ */
+export function atomToSmiles(atom: Atom, brackets: boolean = true): string {
+  let symbol = '';
+  
+  // Add isotope
+  if (atom.isotope !== null) {
+    symbol += atom.isotope.toString();
+  }
+  
+  // Add element (uppercase for non-aromatic)
+  symbol += atom.element.toUpperCase();
+  
+  // Add chirality
+  if (atom.chirality) {
+    symbol += atom.chirality;
+  }
+  
+  // Add H count
+  if (atom.hCount !== null && atom.hCount > 0) {
+    symbol += 'H';
+    if (atom.hCount > 1) {
+      symbol += atom.hCount.toString();
+    }
+  }
+  
+  // Add charge
+  if (atom.charge !== 0) {
+    if (atom.charge > 0) {
+      symbol += '+';
+      symbol += atom.charge.toString();
+    } else {
+      symbol += atom.charge.toString();
+    }
+  }
+  
+  return brackets ? `[${symbol}]` : symbol;
+}
+
+/**
+ * Convert bond to SMILES representation (for encoder)
+ */
+export function bondToSmiles(bond: DirectedBond): string {
+  if (bond.order === 1) {
+    return bond.stereo || '';
+  } else if (bond.order === 2) {
+    return '=';
+  } else if (bond.order === 3) {
+    return '#';
+  } else {
+    return '';
+  }
+}
+
 export function isValidSmiles(smiles: string): boolean {
   if (!smiles || smiles.trim() === '') return false;
   

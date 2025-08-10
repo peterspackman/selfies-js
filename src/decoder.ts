@@ -15,15 +15,21 @@ import {
   nextRingState,
   getIndexFromSelfies
 } from './grammar-rules.js';
-import type { AttributionOptions, DecoderResult, State } from './types.js';
+import type { AttributionOptions, DecoderOptions, DecoderResult, State } from './types.js';
+import { modernizeSymbol, warnDeprecatedCompatibility } from './utils/compatibility-utils.js';
 
 /**
  * Translates a SELFIES string into its corresponding SMILES string.
  */
-export function decoder(selfies: string, options?: AttributionOptions): DecoderResult {
+export function decoder(selfies: string, options?: DecoderOptions): DecoderResult {
   
   if (!selfies || typeof selfies !== 'string') {
     return options?.attribute ? ['C', []] : 'C';
+  }
+
+  // Issue deprecation warning if using backward compatibility
+  if (options?.compatible) {
+    warnDeprecatedCompatibility();
   }
 
   const mol = new MolecularGraph(options?.attribute || false);
@@ -34,7 +40,7 @@ export function decoder(selfies: string, options?: AttributionOptions): DecoderR
   for (const fragment of selfies.split('.')) {
     if (fragment) {
       const n = deriveMolFromSymbols(
-        tokenizeSelfies(fragment),
+        tokenizeSelfies(fragment, options?.compatible),
         mol,
         selfies,
         Infinity,
@@ -55,11 +61,17 @@ export function decoder(selfies: string, options?: AttributionOptions): DecoderR
   return molToSmiles(mol, options?.attribute || false);
 }
 
-function* tokenizeSelfies(selfies: string): Generator<string> {
-  for (const symbol of splitSelfies(selfies)) {
+function* tokenizeSelfies(selfies: string, compatible?: boolean): Generator<string> {
+  for (let symbol of splitSelfies(selfies)) {
     if (symbol === '[nop]') {
       continue;
     }
+    
+    // Apply backward compatibility modernization if needed
+    if (compatible) {
+      symbol = modernizeSymbol(symbol);
+    }
+    
     yield symbol;
   }
 }
@@ -116,13 +128,18 @@ function deriveMolFromSymbols(
         const [binitState, nextState] = nextBranchState(btype, state);
         
         const Q = readIndexFromSelfies(symbolIterWithIndex, n);
+        
+        // Create shared iterator for branch processing (matches Python's approach)
+        const sharedIterator = (function* (): Generator<string> {
+          while (true) {
+            const result = symbolIterWithIndex.next();
+            if (result.done) break;
+            yield result.value[1];
+          }
+        })();
+        
         nDerived += n + deriveMolFromSymbols(
-          (function* (): Generator<string> {
-            for (let i = 0; i <= Q; i++) {
-              const result = symbolIterWithIndex.next();
-              if (!result.done) yield result.value[1];
-            }
-          })(),
+          sharedIterator,
           mol,
           selfies,
           Q + 1,
@@ -249,6 +266,27 @@ function readIndexFromSelfies(symbolIter: Generator<[number, string]>, nSymbols:
 function formRingsBilocally(mol: MolecularGraph, rings: [Atom, Atom, [number, string | null]][]): void {
   const ringsMade = new Array(mol.length).fill(0);
   
+  // PYTHON-EXACT LOGIC: Skip all rings if any ring type has invalid count
+  // First, we need to determine which rings came from which ring types
+  // Since we don't store the original ring type, we use a heuristic:
+  // If any ring appears an odd number of times, skip ALL rings (like Python)
+  
+  const ringPairCounts = new Map<string, number>();
+  for (const [atom1, atom2, bondInfo] of rings) {
+    if (atom1.index !== null && atom2.index !== null) {
+      const key = `${Math.min(atom1.index, atom2.index)}-${Math.max(atom1.index, atom2.index)}`;
+      ringPairCounts.set(key, (ringPairCounts.get(key) || 0) + 1);
+    }
+  }
+  
+  // Check if any ring pair has an odd count (invalid)
+  const hasInvalidRings = Array.from(ringPairCounts.values()).some(count => count % 2 !== 0);
+  
+  if (hasInvalidRings) {
+    // Skip ALL ring formation when any ring is invalid (Python behavior)
+    return;
+  }
+  
   for (const [atom1, atom2, bondInfo] of rings) {
     if (atom1.index !== null && atom2.index !== null) {
       const lidx = atom1.index;
@@ -291,5 +329,5 @@ function formRingsBilocally(mol: MolecularGraph, rings: [Atom, Atom, [number, st
 }
 
 function raiseDecoderError(selfies: string, symbol: string): never {
-  throw new DecoderError(`Malformed SELFIES string: invalid symbol '${symbol}' in '${selfies}'`);
+  throw new DecoderError(`invalid symbol '${symbol}'\n\tSELFIES: ${selfies}`);
 }

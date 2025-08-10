@@ -20,7 +20,7 @@
  *     const benzeneSmiles = selfies.decoder(benzeneSelfies);
  */
 
-export const version = "0.1.0";
+export const version = "0.2.0";
 
 // Core encoding/decoding functions
 export { encoder } from './encoder.js';
@@ -31,11 +31,12 @@ export {
   getPresetConstraints,
   getSemanticConstraints,
   getSemanticRobustAlphabet,
-  setSemanticConstraints
+  setSemanticConstraints,
+  getBondingCapacity
 } from './bond-constraints.js';
 
 // Exception classes
-export { EncoderError, DecoderError } from './exceptions.js';
+export { EncoderError, DecoderError, SMILESParserError } from './exceptions.js';
 
 // Utility functions
 export {
