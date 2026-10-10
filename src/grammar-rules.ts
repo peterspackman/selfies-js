@@ -5,22 +5,34 @@
 import { ELEMENTS, INDEX_ALPHABET, INDEX_CODE, ORGANIC_SUBSET } from './constants.js';
 import { Atom } from './mol-graph.js';
 import type { State } from './types.js';
+import { smilesToBond } from './utils/smiles-parser.js';
 
 // Cache for performance optimization
 const PROCESS_ATOM_CACHE = new Map<string, [[number, string | null], () => Atom] | null>();
 const PROCESS_BRANCH_CACHE = new Map<string, [number, number]>();
 const PROCESS_RING_CACHE = new Map<string, [number, number, [string | null, string | null]]>();
 
-// SELFIES atom pattern matching - updated to match Python exactly  
-const SELFIES_ATOM_PATTERN = new RegExp("^\\[([=#/\\\\]?)(\\d*)([A-Z][a-z]?)([@]{0,2})((?:[H]\\d)?)((?:[+-]\\d+)?)\\]$");
+// SELFIES atom pattern: [<bond><isotope><element><chirality><H count><charge>]
+const SELFIES_ATOM_PATTERN = new RegExp(
+  "^\\[" +
+  "([=#/\\\\]?)" +        // bond char
+  "(\\d*)" +               // isotope number (optional, e.g. 123, 26)
+  "([A-Z][a-z]?)" +        // element symbol
+  "(@{0,2})" +             // chiral tag (optional, only @ and @@ supported)
+  "((?:H\\d)?)" +           // H count (optional, e.g. H1, H3)
+  "((?:[+-][1-9]\\d*)?)" +  // charge (optional, e.g. +1)
+  "\\]$"
+);
 
 export function processAtomSymbol(symbol: string): [[number, string | null], Atom] | null {
   let output = PROCESS_ATOM_CACHE.get(symbol);
   if (output === undefined) {
     output = processAtomSelfiesNoCache(symbol);
+    if (output === null) {
+      return null;
+    }
     PROCESS_ATOM_CACHE.set(symbol, output);
   }
-
   if (output === null) {
     return null;
   }
@@ -36,36 +48,36 @@ export function processAtomSymbol(symbol: string): [[number, string | null], Ato
 }
 
 export function processBranchSymbol(symbol: string): [number, number] | null {
-  return PROCESS_BRANCH_CACHE.get(symbol) || null;
+  return PROCESS_BRANCH_CACHE.get(symbol) ?? null;
 }
 
 export function processRingSymbol(symbol: string): [number, number, [string | null, string | null]] | null {
-  return PROCESS_RING_CACHE.get(symbol) || null;
+  return PROCESS_RING_CACHE.get(symbol) ?? null;
 }
 
 export function nextAtomState(
-  bondOrder: number, 
-  bondCap: number, 
-  state: State
+  bondOrder: number,
+  bondCap: number,
+  state: number
 ): [number, State] {
   if (state === 0) {
     bondOrder = 0;
   }
 
-  bondOrder = Math.min(bondOrder, state || 0, bondCap);
+  bondOrder = Math.min(bondOrder, state, bondCap);
   const bondsLeft = bondCap - bondOrder;
   const nextState = bondsLeft === 0 ? null : bondsLeft;
   return [bondOrder, nextState];
 }
 
 export function nextBranchState(
-  branchType: number, 
-  state: State
+  branchType: number,
+  state: number
 ): [number, State] {
   if (!(1 <= branchType && branchType <= 3)) {
     throw new Error(`Invalid branch type: ${branchType}`);
   }
-  if (state === null || state <= 1) {
+  if (state <= 1) {
     throw new Error(`Invalid state for branching: ${state}`);
   }
 
@@ -75,10 +87,10 @@ export function nextBranchState(
 }
 
 export function nextRingState(
-  ringType: number, 
-  state: State
+  ringType: number,
+  state: number
 ): [number, State] {
-  if (state === null || state <= 0) {
+  if (state <= 0) {
     throw new Error(`Invalid state for ring: ${state}`);
   }
 
@@ -88,16 +100,13 @@ export function nextRingState(
   return [bondOrder, nextState];
 }
 
-export function getIndexFromSelfies(...symbols: string[]): number {
+export function getIndexFromSelfies(...symbols: (string | null)[]): number {
   let index = 0;
-  const reversedSymbols = symbols.slice().reverse();
-  
-  for (let i = 0; i < reversedSymbols.length; i++) {
-    const symbol = reversedSymbols[i];
-    const code = INDEX_CODE[symbol] || 0;
-    index += code * Math.pow(Object.keys(INDEX_CODE).length, i);
+  const base = INDEX_ALPHABET.length;
+  for (const symbol of symbols) {
+    const code = symbol !== null && Object.prototype.hasOwnProperty.call(INDEX_CODE, symbol) ? INDEX_CODE[symbol] : 0;
+    index = index * base + code;
   }
-  
   return index;
 }
 
@@ -118,25 +127,6 @@ export function getSelfiesFromIndex(index: number): string[] {
   }
   
   return symbols.reverse();
-}
-
-function smilesToBond(bondChar: string): [number, string | null] {
-  switch (bondChar) {
-    case '':
-      return [1, null];
-    case '=':
-      return [2, null];
-    case '#':
-      return [3, null];
-    case '/':
-      return [1, '/'];
-    case '\\':
-      return [1, '\\'];
-    case '-':
-      return [1, null];
-    default:
-      throw new Error(`Unknown bond character: ${bondChar}`);
-  }
 }
 
 function processAtomSelfiesNoCache(symbol: string): [[number, string | null], () => Atom] | null {
@@ -241,11 +231,3 @@ buildAtomCache();
 buildBranchCache();
 buildRingCache();
 
-export function clearCaches(): void {
-  PROCESS_ATOM_CACHE.clear();
-  PROCESS_BRANCH_CACHE.clear();
-  PROCESS_RING_CACHE.clear();
-  buildAtomCache();
-  buildBranchCache();
-  buildRingCache();
-}

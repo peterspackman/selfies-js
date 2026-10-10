@@ -3,292 +3,173 @@
  */
 
 import { MolecularGraph, Atom, DirectedBond } from '../mol-graph.js';
-import type { AttributionMap, TokenAttribution, Attribution } from '../types.js';
+import type { AttributionMap } from '../types.js';
 import { ORGANIC_SUBSET } from '../constants.js';
+import { SMILES_STEREO_BONDS } from './smiles-parser.js';
 
-class RingContext {
-  private nextRingNumber = 1;
-  private ringBondToNumber = new Map<string, number>();
-  
-  getRingNumber(atomIdx1: number, atomIdx2: number): number {
-    const key1 = `${atomIdx1}-${atomIdx2}`;
-    const key2 = `${atomIdx2}-${atomIdx1}`;
-    
-    let ringNumber = this.ringBondToNumber.get(key1) ?? this.ringBondToNumber.get(key2);
-    
-    if (ringNumber === undefined) {
-      ringNumber = this.nextRingNumber++;
-      this.ringBondToNumber.set(key1, ringNumber);
-      this.ringBondToNumber.set(key2, ringNumber);
-    }
-    
-    return ringNumber;
-  }
-}
-
-export function molToSmiles(
-  mol: MolecularGraph, 
-  attribute: boolean = false
-): string | [string, AttributionMap] {
-  if (mol.length === 0) {
-    return attribute ? ['', []] : '';
+/**
+ * Converts an atom into its SMILES representation.
+ *
+ * @param atom - the input atom
+ * @param brackets - true if brackets should be added around the returned
+ *   symbol (e.g. in the case of [C] or [C@@H])
+ * @returns a SMILES symbol representing the input atom
+ */
+export function atomToSmiles(atom: Atom, brackets: boolean = true): string {
+  if (atom.isAromatic) {
+    throw new Error('Cannot write an aromatic atom; the molecule must be kekulized first');
   }
 
-  const fragments: string[] = [];
-  const attributionMaps: TokenAttribution[] = [];
-  
-  for (const rootIdx of mol.getRoots()) {
-    const visited = new Set<number>();
-    const ringContext = new RingContext();
-    const [smilesFrag, fragAttribution] = moleculeAtomToSmiles(
-      mol, rootIdx, visited, attribute, undefined, ringContext
-    );
-    fragments.push(smilesFrag);
-    if (attribute && fragAttribution) {
-      attributionMaps.push(...fragAttribution);
-    }
-  }
-
-  const smilesString = fragments.join('.');
-  
-  if (attribute) {
-    return [smilesString, attributionMaps];
-  }
-  
-  return smilesString;
-}
-
-function moleculeAtomToSmiles(
-  mol: MolecularGraph,
-  atomIdx: number,
-  visited: Set<number>,
-  attribute: boolean,
-  fromBond?: DirectedBond,
-  ringContext?: RingContext
-): [string, TokenAttribution[] | null] {
-  if (visited.has(atomIdx)) {
-    // This should handle ring closures, but for now just return empty
-    return ['', null];
-  }
-
-  visited.add(atomIdx);
-  const atom = mol.getAtom(atomIdx);
-  
-  // Generate atom string
-  const atomStr = formatAtomForSmiles(atom);
-  
-  const attributions: TokenAttribution[] = [];
-  if (attribute) {
-    const atomAttribution = mol.getAttribution(atom);
-    if (atomAttribution) {
-      attributions.push({
-        token: atomStr,
-        attribution: atomAttribution
-      });
-    }
-  }
-
-  // Process outgoing bonds
-  let smilesStr = atomStr;
-  const outBonds = mol.getOutDirBonds(atomIdx);
-  
-  // Separate regular bonds from ring bonds
-  const regularBonds: DirectedBond[] = [];
-  const ringBonds: DirectedBond[] = [];
-  
-  for (const bond of outBonds) {
-    if (bond.dst === atomIdx) continue; // Skip reverse bonds
-    
-    if (bond.ringBond) {
-      ringBonds.push(bond);
-    } else if (!visited.has(bond.dst)) {
-      regularBonds.push(bond);
-    }
-  }
-  
-  // Add ring closure numbers for ring bonds
-  for (const bond of ringBonds) {
-    if (ringContext) {
-      const ringNumber = ringContext.getRingNumber(atomIdx, bond.dst);
-      // Ring closure numbers should not have bond order prefixes
-      // Bond order is expressed through the bond path, not the closure
-      smilesStr += ringNumber.toString();
-    }
-  }
-  
-  // Process regular bonds to unvisited atoms
-  for (let bondIndex = 0; bondIndex < regularBonds.length; bondIndex++) {
-    const bond = regularBonds[bondIndex];
-    const [bondStr, bondAttribution] = moleculeBondToSmiles(bond, attribute ? mol.getAttribution(bond) : null);
-    const [childStr, childAttribution] = moleculeAtomToSmiles(mol, bond.dst, visited, attribute, bond, ringContext);
-    
-    let bondFragment = bondStr + childStr;
-    
-    // Add parentheses for branching - PYTHON'S "LAST BOND WINS" STRATEGY
-    // All bonds except the last one are treated as branches
-    if (bondIndex < regularBonds.length - 1) {
-      bondFragment = '(' + bondFragment + ')';
-    }
-    
-    smilesStr += bondFragment;
-    
-    if (attribute) {
-      if (bondAttribution) attributions.push(bondAttribution);
-      if (childAttribution) attributions.push(...childAttribution);
-    }
-  }
-
-  return [smilesStr, attribute ? attributions : null];
-}
-
-function formatAtomForSmiles(atom: Atom): string {
-  // Handle organic subset shorthand
-  if (ORGANIC_SUBSET.has(atom.element) && 
-      atom.charge === 0 && 
-      !atom.chirality && 
-      !atom.isotope &&
-      (atom.hCount === null || atom.hCount === 0)) {
+  if (atom.isotope === null && atom.chirality === null && atom.hCount === null && atom.charge === 0) {
     return atom.element;
   }
 
-  // Build bracketed atom notation
-  let result = '[';
-  
-  if (atom.isotope !== null) {
-    result += atom.isotope.toString();
-  }
-  
-  result += atom.element;
-  
-  if (atom.chirality) {
-    result += atom.chirality;
-  }
-  
-  if (atom.hCount !== null && atom.hCount > 0) {
-    result += 'H';
-    if (atom.hCount > 1) {
-      result += atom.hCount.toString();
-    }
-  }
-  
-  if (atom.charge !== 0) {
-    if (atom.charge > 0) {
-      result += '+';
-      result += atom.charge.toString();
-    } else {
-      result += atom.charge.toString();
-    }
-  }
-  
-  result += ']';
-  return result;
-}
-
-function moleculeBondToSmiles(
-  bond: DirectedBond,
-  attribution: Attribution[] | null
-): [string, TokenAttribution | null] {
-  let bondStr = '';
-  
-  switch (bond.order) {
-    case 1:
-      if (bond.stereo === '/') bondStr = '/';
-      else if (bond.stereo === '\\') bondStr = '\\';
-      // Single bonds are usually implicit
-      break;
-    case 2:
-      bondStr = '=';
-      break;
-    case 3:
-      bondStr = '#';
-      break;
-    case 1.5:
-      // Aromatic bonds are typically implicit, but shouldn't occur in kekulized form
-      break;
-  }
-
-  const tokenAttribution: TokenAttribution | null = attribution ? {
-    token: bondStr,
-    attribution: attribution
-  } : null;
-
-  return [bondStr, tokenAttribution];
-}
-
-// Simple SMILES validation
-/**
- * Convert atom to SMILES representation (for encoder)
- */
-export function atomToSmiles(atom: Atom, brackets: boolean = true): string {
   let symbol = '';
-  
-  // Add isotope
   if (atom.isotope !== null) {
     symbol += atom.isotope.toString();
   }
-  
-  // Add element (uppercase for non-aromatic)
-  symbol += atom.element.toUpperCase();
-  
-  // Add chirality
-  if (atom.chirality) {
+  symbol += atom.element;
+  if (atom.chirality !== null) {
     symbol += atom.chirality;
   }
-  
-  // Add H count
-  if (atom.hCount !== null && atom.hCount > 0) {
-    symbol += 'H';
-    if (atom.hCount > 1) {
-      symbol += atom.hCount.toString();
-    }
+  if (atom.hCount !== null && atom.hCount !== 0) {
+    symbol += `H${atom.hCount}`;
+  } else if (atom.hCount === 0 && atom.isotope === null && atom.chirality === null &&
+             atom.charge === 0 && ORGANIC_SUBSET.has(atom.element)) {
+    // Explicitly zero Hs, so that e.g. [CH0] is not read back as an organic-subset C
+    symbol += 'H0';
   }
-  
-  // Add charge
   if (atom.charge !== 0) {
-    if (atom.charge > 0) {
-      symbol += '+';
-      symbol += atom.charge.toString();
-    } else {
-      symbol += atom.charge.toString();
-    }
+    symbol += (atom.charge > 0 ? '+' : '') + atom.charge.toString();
   }
-  
+
   return brackets ? `[${symbol}]` : symbol;
 }
 
 /**
- * Convert bond to SMILES representation (for encoder)
+ * Converts a bond into its SMILES representation.
+ *
+ * @param bond - the input bond
+ * @returns a SMILES symbol representing the input bond
  */
 export function bondToSmiles(bond: DirectedBond): string {
   if (bond.order === 1) {
-    return bond.stereo || '';
+    return bond.stereo !== null && SMILES_STEREO_BONDS.has(bond.stereo) ? bond.stereo : '';
   } else if (bond.order === 2) {
     return '=';
   } else if (bond.order === 3) {
     return '#';
-  } else {
-    return '';
   }
+  throw new Error(`Cannot write bond of order ${bond.order}`);
 }
 
-export function isValidSmiles(smiles: string): boolean {
-  if (!smiles || smiles.trim() === '') return false;
-  
-  // Check for basic structural issues
-  const openParens = (smiles.match(/\(/g) || []).length;
-  const closeParens = (smiles.match(/\)/g) || []).length;
-  if (openParens !== closeParens) return false;
-  
-  const openBrackets = (smiles.match(/\[/g) || []).length;
-  const closeBrackets = (smiles.match(/\]/g) || []).length;
-  if (openBrackets !== closeBrackets) return false;
-  
-  // Check for invalid characters
-  if (/[*$]/.test(smiles)) return false;
-  
-  // Check for malformed patterns
-  if (/^\(/.test(smiles) || /\)$/.test(smiles)) return false;
-  if (/\([^)]*$/.test(smiles) || /^[^(]*\)$/.test(smiles)) return false;
-  
-  return true;
+/**
+ * Converts a molecular graph into its SMILES representation, maintaining
+ * the traversal order indicated by the input graph.
+ *
+ * @param mol - the input molecule
+ * @param attribute - if an attribution should be returned
+ */
+export function molToSmiles(
+  mol: MolecularGraph,
+  attribute: boolean = false
+): string | [string, AttributionMap] {
+  if (!mol.isKekulized()) {
+    throw new Error('Molecule must be kekulized before writing SMILES');
+  }
+
+  const fragments: string[] = [];
+  let attributionMaps: AttributionMap | null = attribute ? [] : null;
+  let attributionIndex = 0;
+  const ringLog = new Map<string, number>();
+
+  for (const root of mol.getRoots()) {
+    const derived: string[] = [];
+    deriveSmilesFromFragment(derived, mol, root, ringLog, attributionMaps, attributionIndex);
+    const fragment = derived.join('');
+    attributionIndex += fragment.length + 1; // +1 for the '.' separator
+    fragments.push(fragment);
+  }
+
+  const smiles = fragments.join('.');
+  if (attributionMaps === null) {
+    return smiles;
+  }
+  // Trim attribution map of empty tokens
+  attributionMaps = attributionMaps.filter(a => a.token);
+  return [smiles, attributionMaps];
+}
+
+function ringNumberToSmiles(rnum: number): string {
+  if (rnum < 10) return rnum.toString();
+  if (rnum < 100) return `%${rnum}`;
+  return `%(${rnum})`;
+}
+
+function deriveSmilesFromFragment(
+  derived: string[],
+  mol: MolecularGraph,
+  root: number,
+  ringLog: Map<string, number>,
+  attributionMaps: AttributionMap | null,
+  attributionIndex: number
+): void {
+  // Iterative depth-first traversal; avoids stack overflows on long chains
+  let derivedLen = 0;
+  // Appends a token and returns its starting character index in the full SMILES
+  const push = (token: string): number => {
+    const start = derivedLen + attributionIndex;
+    derived.push(token);
+    derivedLen += token.length;
+    return start;
+  };
+  const record = (token: string, attribution: ReturnType<MolecularGraph['getAttribution']>, index: number) => {
+    if (attributionMaps !== null) {
+      attributionMaps.push({ index, token, attribution: attribution ?? [] });
+    }
+  };
+
+  type Frame = { curr: number; bondIndex: number; needsClosing: boolean };
+  const stack: Frame[] = [{ curr: root, bondIndex: 0, needsClosing: false }];
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1];
+    const outBonds = mol.getOutDirBonds(frame.curr);
+
+    if (frame.bondIndex === 0) {
+      const atom = mol.getAtom(frame.curr);
+      const token = atomToSmiles(atom);
+      record(token, mol.getAttribution(atom), push(token));
+    }
+
+    if (frame.bondIndex < outBonds.length) {
+      const bond = outBonds[frame.bondIndex];
+      const isLast = frame.bondIndex === outBonds.length - 1;
+      frame.bondIndex += 1;
+
+      if (bond.ringBond) {
+        const token = bondToSmiles(bond);
+        record(token, mol.getAttribution(bond), push(token));
+        const key = `${Math.min(bond.src, bond.dst)},${Math.max(bond.src, bond.dst)}`;
+        let rnum = ringLog.get(key);
+        if (rnum === undefined) {
+          rnum = ringLog.size + 1;
+          ringLog.set(key, rnum);
+        }
+        push(ringNumberToSmiles(rnum));
+      } else {
+        if (!isLast) {
+          push('(');
+        }
+        const token = bondToSmiles(bond);
+        record(token, mol.getAttribution(bond), push(token));
+        stack.push({ curr: bond.dst, bondIndex: 0, needsClosing: !isLast });
+      }
+    } else {
+      stack.pop();
+      if (frame.needsClosing) {
+        push(')');
+      }
+    }
+  }
 }

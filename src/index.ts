@@ -53,12 +53,14 @@ export {
 } from './utils/encoding-utils.js';
 
 // Export types for TypeScript users
+export { Attribution } from './types.js';
 export type {
   AttributionMap,
   TokenAttribution,
-  Attribution,
   EncodingType,
-  SemanticConstraints
+  SemanticConstraints,
+  EncoderOptions,
+  DecoderOptions
 } from './types.js';
 
 // Export molecular graph classes for advanced users

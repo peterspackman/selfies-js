@@ -105,10 +105,14 @@ describe('SELFIES Core Tests', () => {
 
     const newConstraints = selfies.getSemanticConstraints();
     newConstraints["C"] = 1;
+    newConstraints["O"] = 1;
     selfies.setSemanticConstraints(newConstraints);
 
+    // [=C] and [#C] remain, since they are index symbols; [=O] is dropped
     const newAlphabet = selfies.getSemanticRobustAlphabet();
     assert.notDeepEqual(newAlphabet, alphabet);
+    assert(newAlphabet.has("[=C]"));
+    assert(!newAlphabet.has("[=O]"));
     assert.equal(selfies.decoder("[C][#C]"), "CC");
 
     selfies.setSemanticConstraints(); // re-set alphabet
@@ -155,26 +159,13 @@ describe('SELFIES Core Tests', () => {
     ) as [string, selfies.AttributionMap];
     
     const [smiles, attributionMap] = result;
-    
+    assert.equal(smiles, "C1NC(P)CC1");
+
     // Check that P lined up
-    let found = false;
-    console.log(`Attribution map has ${attributionMap.length} entries`);
-    console.log(`SMILES result: "${smiles}"`);
-    for (let i = 0; i < Math.min(attributionMap.length, 15); i++) {
-      const tokenAttr = attributionMap[i];
-      console.log(`  ${i}: token="${tokenAttr.token}", attributions=${tokenAttr.attribution.length}`);
-      if (tokenAttr.token === 'P') {
-        console.log(`    Found P! Checking attributions...`);
-        for (const attr of tokenAttr.attribution) {
-          console.log(`      - ${attr.token}`);
-          if (attr.token === '[P]') {
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    assert(found, 'Failed to find P in attribution map');
+    const p = attributionMap.find(a => a.token === 'P');
+    assert(p, 'Failed to find P in attribution map');
+    assert.equal(smiles[p.index], 'P');
+    assert.deepEqual(p.attribution.map(a => [a.index, a.token]), [[3, '[Branch1]'], [5, '[P]']]);
   });
 
   test('encoder attribution', async () => {
@@ -187,9 +178,12 @@ describe('SELFIES Core Tests', () => {
     const result = selfies.encoder(smiles, { attribute: true }) as [string, selfies.AttributionMap];
     const [, attributionMap] = result;
     
+    assert.equal(attributionMap.length, expectedIndices.length);
     for (let i = 0; i < attributionMap.length; i++) {
       const tokenAttr = attributionMap[i];
-      if (tokenAttr.attribution && tokenAttr.attribution.length > 0) {
+      if (expectedIndices[i] === null) {
+        assert.equal(tokenAttr.attribution.length, 0);
+      } else {
         assert.equal(
           expectedIndices[i], 
           tokenAttr.attribution[0].index,
@@ -206,75 +200,61 @@ describe('SELFIES Core Tests', () => {
   });
 
   test('aromatic benzene encoding/decoding', async () => {
-    // Test that benzene roundtrips correctly  
-    const benzeneSmiles = "c1ccccc1";
-    
-    // First check that we can encode without error
-    const benzeneSelies = selfies.encoder(benzeneSmiles);
-    assert(typeof benzeneSelies === 'string', 'Should encode benzene to string');
-    
-    // Check that we can decode without error
-    const decodedSmiles = selfies.decoder(benzeneSelies);
-    assert(typeof decodedSmiles === 'string', 'Should decode benzene SELFIES to string');
-    
-    // Expected Python SELFIES behavior:
-    // Input: "c1ccccc1" -> SELFIES: "[C][=C][C][=C][C][=C][Ring1][=Branch1]" -> Output: "C1=CC=CC=C1"
-    const expectedSelfies = "[C][=C][C][=C][C][=C][Ring1][=Branch1]";
-    const expectedSmiles = "C1=CC=CC=C1";
-    
-    // For now, just document the expected behavior (will fail until we fix aromatic handling)
-    console.log(`Benzene test - Input: ${benzeneSmiles}`);
-    console.log(`Expected SELFIES: ${expectedSelfies}`);
-    console.log(`Actual SELFIES:   ${benzeneSelies}`);
-    console.log(`Expected SMILES:  ${expectedSmiles}`);
-    console.log(`Actual SMILES:    ${decodedSmiles}`);
-    
-    // TODO: Uncomment these assertions after fixing aromatic handling
-    // assert.equal(benzeneSelies, expectedSelfies, 'Benzene SELFIES should match Python output');
-    // assert.equal(decodedSmiles, expectedSmiles, 'Decoded benzene should match expected structure');
+    const benzeneSelfies = selfies.encoder("c1ccccc1");
+    assert.equal(benzeneSelfies, "[C][=C][C][=C][C][=C][Ring1][=Branch1]");
+    assert.equal(selfies.decoder(benzeneSelfies), "C1=CC=CC=C1");
   });
 
   test('simple aromatic molecules', async () => {
-    const testCases = [
-      {
-        name: "furan", 
-        smiles: "c1ccoc1",
-      },
-      {
-        name: "thiophene",
-        smiles: "c1ccsc1", 
-      },
-      {
-        name: "pyridine",
-        smiles: "c1ccncc1",
-      }
+    const testCases: [string, string][] = [
+      ["c1ccoc1", "[C][C][=C][O][C][=Ring1][Branch1]"],
+      ["c1ccsc1", "[C][C][=C][S][C][=Ring1][Branch1]"],
+      ["c1ccncc1", "[C][=C][C][=N][C][=C][Ring1][=Branch1]"],
+      ["c1cc[nH]c1", "[C][C][=C][NH1][C][=Ring1][Branch1]"],
+      ["[O-][n+]1ccccc1", "[O-1][N+1][=C][C][=C][C][=C][Ring1][=Branch1]"],
     ];
+    for (const [smiles, expected] of testCases) {
+      assert.equal(selfies.encoder(smiles), expected, smiles);
+    }
+  });
 
-    for (const testCase of testCases) {
-      console.log(`\nTesting ${testCase.name} (${testCase.smiles}):`);
-      
-      try {
-        const selfiesStr = selfies.encoder(testCase.smiles) as string;
-        const backToSmiles = selfies.decoder(selfiesStr);
-        
-        console.log(`  SELFIES: ${selfiesStr}`);
-        console.log(`  Back to SMILES: ${backToSmiles}`);
-        
-        // Basic checks - should not crash
-        assert(typeof selfiesStr === 'string', `${testCase.name} should encode to string`);
-        assert(typeof backToSmiles === 'string', `${testCase.name} should decode to string`);
-        
-      } catch (error) {
-        console.error(`  ERROR: ${(error as Error).message}`);
-        throw error;
-      }
+  test('ring and stereo features', async () => {
+    // Two-digit ring numbers, ring bond orders and chirality next to rings
+    assert.equal(selfies.encoder("C%11CCCCC%11"), "[C][C][C][C][C][C][Ring1][=Branch1]");
+    assert.equal(selfies.encoder("C=1CC1"), "[C][C][C][=Ring1][Ring1]");
+    assert.equal(selfies.decoder("[C][C][C][=Ring1][Ring1]"), "C=1CC=1");
+    assert.equal(selfies.encoder("[C@H]1(F)CCC1"), "[C@H1][Branch1][C][F][C][C][C][Ring1][Branch1]");
+    assert.equal(selfies.encoder("ClC(Br)c1ccccc1"), "[Cl][C][Branch1][C][Br][C][=C][C][=C][C][=C][Ring1][=Branch1]");
+    assert.equal(selfies.decoder("[C][/C][=C][\\C]"), "C/C=C\\C");
+    assert.equal(selfies.decoder("[C][C][C][C][\\/Ring1][Ring2]"), "C\\1CCC/1");
+  });
+
+  test('decoder stops once bonding capacity is exhausted', async () => {
+    assert.equal(selfies.decoder("[C][F][C]"), "CF");
+    assert.equal(selfies.decoder("[F][F][C]"), "FF");
+    assert.equal(selfies.decoder(""), "");
+    assert.equal(selfies.decoder("[CH0]"), "[CH0]");
+  });
+
+  test('encoder strict mode', async () => {
+    assert.throws(() => selfies.encoder("C(F)(F)(F)(F)F"), selfies.EncoderError);
+    assert.equal(selfies.encoder("C(F)(F)(F)(F)F", { strict: false }), "[C][Branch1][C][F][Branch1][C][F][Branch1][C][F][Branch1][C][F][F]");
+  });
+
+  test('backward compatible decoding', async () => {
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      assert.equal(selfies.decoder("[C][Branch1_2][C][=O][O]", { compatible: true }), "C(=O)O");
+      assert.equal(selfies.decoder("[NHexpl][C]", { compatible: true }), "[NH1]C");
+      assert.equal(selfies.decoder("[C][C][C][Expl/Ring1][C]", { compatible: true }), "CC=C");
+    } finally {
+      console.warn = warn;
     }
   });
 
   test('decoder python equivalence', async () => {
     // Test cases generated from Python SELFIES to ensure exact SMILES output match
-    // NOTE: Some complex branch cases have known differences due to nested branch processing
-    // These are marked and tracked for future investigation
     const pythonTestCases = [
       {
         selfies: '[=Branch3][#O+1][=C][=S+1][Branch3][=B+1][Ring1][O][=P][#C][N+1][#P][N]',
@@ -322,23 +302,14 @@ describe('SELFIES Core Tests', () => {
       const testCase = pythonTestCases[i];
       const actualSmiles = selfies.decoder(testCase.selfies) as string;
       
-      // Test case 1: passes after charge formatting fix
-      // Test cases 2+: have known differences in complex branch processing
-      if (i === 0) {
-        assert.equal(
-          actualSmiles,
-          testCase.expectedSmiles,
-          `Test ${i + 1} failed:\n` +
-          `  SELFIES: ${testCase.selfies}\n` +
-          `  Expected: ${testCase.expectedSmiles}\n` +
-          `  Actual:   ${actualSmiles}`
-        );
-      } else {
-        // For now, just verify it decodes without error
-        // TODO: Fix nested branch processing to match Python exactly
-        assert(typeof actualSmiles === 'string' && actualSmiles.length > 0, 
-               `Test ${i + 1} should produce valid SMILES string`);
-      }
+      assert.equal(
+        actualSmiles,
+        testCase.expectedSmiles,
+        `Test ${i + 1} failed:\n` +
+        `  SELFIES: ${testCase.selfies}\n` +
+        `  Expected: ${testCase.expectedSmiles}\n` +
+        `  Actual:   ${actualSmiles}`
+      );
     }
   });
 });

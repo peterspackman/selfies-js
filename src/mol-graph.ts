@@ -5,7 +5,6 @@
 import { getBondingCapacity } from './bond-constraints.js';
 import { findPerfectMatching } from './utils/matching-utils.js';
 import { Attribution } from './types.js';
-import type { AttributionMap } from './types.js';
 import { AROMATIC_VALENCES, VALENCE_ELECTRONS } from './constants.js';
 
 export { Attribution };
@@ -150,22 +149,15 @@ export class MolecularGraph {
   }
 
   getOutDirBonds(src: number): DirectedBond[] {
-    return [...this._adjList[src]];
+    return this._adjList[src];
   }
 
   getDirBond(src: number, dst: number): DirectedBond {
-    const key = this._bondKey(src, dst);
-    const bond = this._bondDict.get(key);
+    const bond = this._bondDict.get(this._bondKey(src, dst));
     if (!bond) {
-      throw new Error(`No bond found between ${src} and ${dst}`);
+      throw new Error(`No bond found from ${src} to ${dst}`);
     }
-    // Return directed bond in the requested direction
-    if (bond.src === src) {
-      return bond;
-    } else {
-      // Create reversed bond
-      return new DirectedBond(src, dst, bond.order, bond.stereo, bond.ringBond);
-    }
+    return bond;
   }
 
   getBondCount(idx: number): number {
@@ -223,7 +215,8 @@ export class MolecularGraph {
 
   addPlaceholderBond(src: number): number {
     const outEdges = this._adjList[src];
-    outEdges.push(null as any);
+    // Reserves a slot that is filled in later by addRingBond
+    outEdges.push(null as unknown as DirectedBond);
     return outEdges.length - 1;
   }
 
@@ -319,8 +312,6 @@ export class MolecularGraph {
 
     const ds = this._delocalSubgraph;
     const keptNodes = new Set<number>();
-    
-    // Prune nodes that can't be in a perfect matching
     for (const node of ds.keys()) {
       if (!this._pruneFromDs(node)) {
         keptNodes.add(node);
@@ -332,11 +323,11 @@ export class MolecularGraph {
     const nodeToLabel = new Map<number, number>();
     labelToNode.forEach((node, i) => nodeToLabel.set(node, i));
 
-    // Create pruned and relabelled DS
-    const prunedDs: number[][] = Array(keptNodes.size).fill(null).map(() => []);
+    // Pruned and relabelled DS
+    const prunedDs: number[][] = labelToNode.map(() => []);
     for (const node of keptNodes) {
       const label = nodeToLabel.get(node)!;
-      for (const adj of ds.get(node) || []) {
+      for (const adj of ds.get(node)!) {
         if (keptNodes.has(adj)) {
           prunedDs[label].push(nodeToLabel.get(adj)!);
         }
@@ -349,113 +340,60 @@ export class MolecularGraph {
     }
 
     // De-aromatize and then make double bonds
-    for (const node of ds.keys()) {
-      for (const adj of ds.get(node) || []) {
+    for (const [node, adjNodes] of ds) {
+      for (const adj of adjNodes) {
         this.updateBondOrder(node, adj, 1);
       }
-      if (node < this._atoms.length) {
-        this._atoms[node].isAromatic = false;
-        this._bondCounts[node] = Math.round(this._bondCounts[node]);
-      }
+      this._atoms[node].isAromatic = false;
+      this._bondCounts[node] = Math.trunc(this._bondCounts[node]);
     }
 
-    // Create double bonds based on perfect matching
     for (let i = 0; i < matching.length; i++) {
-      const matchedLabel = matching[i];
-      if (matchedLabel !== null && i < matchedLabel) { // Process each pair only once
-        const node1 = labelToNode[i];
-        const node2 = labelToNode[matchedLabel];
-        this.updateBondOrder(node1, node2, 2);
-      }
+      this.updateBondOrder(labelToNode[i], labelToNode[matching[i]], 2);
     }
 
-    this._delocalSubgraph.clear(); // Clear DS
+    this._delocalSubgraph.clear();
     return true;
   }
 
+  /**
+   * Returns true if the given node of the delocalization subgraph cannot
+   * take part in a double bond (and so should be pruned before matching).
+   */
   private _pruneFromDs(node: number): boolean {
-    const adjNodes = this._delocalSubgraph.get(node) || [];
+    const adjNodes = this._delocalSubgraph.get(node)!;
     if (adjNodes.length === 0) {
-      return true; // Prune isolated nodes
+      return true; // aromatic atom with no aromatic bonds
     }
-    
-    if (node >= this._atoms.length) {
-      return true; // Invalid node
-    }
-    
+
     const atom = this._atoms[node];
-    
-    // Check if element can be aromatic
-    const aromaticValences = AROMATIC_VALENCES[atom.element];
-    if (!aromaticValences) {
-      return true; // Element cannot be aromatic
+    const valences = AROMATIC_VALENCES[atom.element];
+    const bondCount = this._bondCounts[node];
+
+    // Each bond in DS has order 1.5 - we treat them as single bonds
+    let usedElectrons = Math.trunc(bondCount - 0.5 * adjNodes.length);
+
+    if (atom.hCount === null) {
+      // Account for implicit Hs
+      return valences.includes(usedElectrons);
     }
-    
-    // Calculate electron contribution for aromatic system
-    const valenceElectrons = VALENCE_ELECTRONS[atom.element] || 0;
-    const charge = atom.charge;
-    const hCount = atom.hCount || 0;
-    
-    // Count non-aromatic bonds (bonds to non-aromatic atoms)
-    let usedElectrons = 0;
-    let aromaticBonds = 0;
-    
-    for (let i = 0; i < this._adjList[node].length; i++) {
-      const bond = this._adjList[node][i];
-      if (bond && bond.dst < this._atoms.length) {
-        const dstAtom = this._atoms[bond.dst];
-        if (dstAtom.isAromatic && this._delocalSubgraph.has(bond.dst)) {
-          aromaticBonds++;
-        } else {
-          // Non-aromatic bond - count electrons used
-          usedElectrons += bond.order;
-        }
-      }
+
+    const valence = valences[valences.length - 1] - atom.charge;
+    usedElectrons += atom.hCount;
+
+    // Count the total number of bound electrons of the atom
+    const boundElectrons = Math.max(0, atom.charge) + atom.hCount
+      + Math.trunc(bondCount) + Math.trunc(2 * (bondCount % 1));
+
+    // Calculate the number of unpaired electrons of the atom
+    const radicalElectrons = Math.max(0, VALENCE_ELECTRONS[atom.element] - boundElectrons) % 2;
+
+    // Unpaired electrons do not contribute to the aromatic system
+    const freeElectrons = valence - usedElectrons - radicalElectrons;
+
+    if (valences.some(v => usedElectrons === v - atom.charge)) {
+      return true;
     }
-    
-    // Add electrons used for hydrogen atoms
-    usedElectrons += hCount;
-    
-    // Calculate available electrons for aromatic system
-    const availableElectrons = valenceElectrons - charge - usedElectrons;
-    
-    // Each aromatic bond uses 1.5 electrons on average, but we need
-    // to check if the atom can contribute the right number of electrons
-    // to satisfy one of its allowed aromatic valences
-    
-    // Check if any aromatic valence is achievable
-    let canBeAromatic = false;
-    for (const aromaticValence of aromaticValences) {
-      const requiredElectrons = aromaticValence - usedElectrons;
-      
-      // For aromatic systems, we need to check if the electron count works
-      // The atom needs to be able to form the aromatic bonds plus contribute
-      // to the pi system
-      if (requiredElectrons >= aromaticBonds && 
-          availableElectrons >= aromaticBonds &&
-          availableElectrons <= requiredElectrons) {
-        canBeAromatic = true;
-        break;
-      }
-    }
-    
-    // Special case for common aromatic atoms with typical patterns
-    if (!canBeAromatic && aromaticBonds > 0) {
-      // Carbon in aromatic rings: typically contributes 1 electron to pi system
-      if (atom.element === 'C' && aromaticBonds === 2 && availableElectrons >= 2) {
-        canBeAromatic = true;
-      }
-      // Nitrogen: can contribute 1 or 2 electrons depending on hybridization
-      else if (atom.element === 'N' && aromaticBonds <= 2 && availableElectrons >= 1) {
-        canBeAromatic = true;
-      }
-      // Oxygen and Sulfur: typically contribute 2 electrons (lone pair)
-      else if ((atom.element === 'O' || atom.element === 'S') && 
-               aromaticBonds <= 2 && availableElectrons >= 2) {
-        canBeAromatic = true;
-      }
-    }
-    
-    return !canBeAromatic; // Prune if cannot be aromatic
+    return !(freeElectrons >= 0 && freeElectrons % 2 !== 0);
   }
 }

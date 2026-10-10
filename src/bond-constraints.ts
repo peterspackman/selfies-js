@@ -4,7 +4,6 @@
 
 import { ELEMENTS, INDEX_ALPHABET } from './constants.js';
 import type { SemanticConstraints } from './types.js';
-import { clearCaches as clearGrammarCaches } from './grammar-rules.js';
 
 const DEFAULT_CONSTRAINTS: SemanticConstraints = {
   "H": 1, "F": 1, "Cl": 1, "Br": 1, "I": 1,
@@ -43,7 +42,7 @@ const bondingCapacityCache = new Map<string, number>();
  * @returns The preset constraints as a dictionary mapping atoms to bonding capacities
  */
 export function getPresetConstraints(name: string): SemanticConstraints {
-  if (!(name in PRESET_CONSTRAINTS)) {
+  if (!Object.prototype.hasOwnProperty.call(PRESET_CONSTRAINTS, name)) {
     throw new Error(`unrecognized preset name '${name}'`);
   }
   return { ...PRESET_CONSTRAINTS[name] };
@@ -69,7 +68,7 @@ export function setSemanticConstraints(
   if (typeof bondConstraints === 'string') {
     currentConstraints = getPresetConstraints(bondConstraints);
   } else if (typeof bondConstraints === 'object' && bondConstraints !== null) {
-    if (!('?' in bondConstraints)) {
+    if (!Object.prototype.hasOwnProperty.call(bondConstraints, '?')) {
       throw new Error("bond_constraints missing '?' as a key");
     }
 
@@ -107,7 +106,6 @@ export function setSemanticConstraints(
 function clearCaches(): void {
   semanticRobustAlphabetCache = null;
   bondingCapacityCache.clear();
-  clearGrammarCaches();
 }
 
 /**
@@ -142,20 +140,9 @@ export function getSemanticRobustAlphabet(): Set<string> {
     alphabetSubset.add(`[#Branch${i}]`);
   }
 
+  // Index symbols are always included, as in the reference implementation
   for (const symbol of INDEX_ALPHABET) {
-    // Parse the symbol to check if it satisfies constraints
-    const match = symbol.match(/^\[([=#]?)([A-Z][a-z]?)\]$/);
-    if (match) {
-      const [, bondChar, atom] = match;
-      const multiplicity = bondChar === '=' ? 2 : bondChar === '#' ? 3 : 1;
-      const capacity = currentConstraints[atom] ?? currentConstraints["?"];
-      
-      if (multiplicity <= capacity) {
-        alphabetSubset.add(symbol);
-      }
-    } else {
-      alphabetSubset.add(symbol);
-    }
+    alphabetSubset.add(symbol);
   }
 
   semanticRobustAlphabetCache = new Set(alphabetSubset);
@@ -181,7 +168,9 @@ export function getBondingCapacity(element: string, charge: number): number {
     return bondingCapacityCache.get(cacheKey)!;
   }
 
-  const capacity = currentConstraints[key] ?? currentConstraints["?"];
+  const capacity = Object.prototype.hasOwnProperty.call(currentConstraints, key)
+    ? currentConstraints[key]
+    : currentConstraints["?"];
   bondingCapacityCache.set(cacheKey, capacity);
   return capacity;
 }

@@ -30,13 +30,23 @@ const symbols = [...selfies.splitSelfies(benzeneSelfies)];
 
 ## API
 
-- `encoder(smiles)` - Convert SMILES to SELFIES
-- `decoder(selfies)` - Convert SELFIES to SMILES  
-- `setSemanticConstraints()` - Configure bonding constraints
+- `encoder(smiles, { strict?, attribute? })` - Convert SMILES to SELFIES. Aromatic SMILES are kekulized first.
+  With `strict` (default `true`) molecules violating the current semantic constraints are rejected.
+  Throws `EncoderError` for invalid or unsupported SMILES (`*`, `$`, chirality other than `@`/`@@`).
+- `decoder(selfies, { attribute?, compatible? })` - Convert SELFIES to SMILES. `compatible` accepts
+  symbols from SELFIES < v2. Throws `DecoderError` for malformed SELFIES.
+- `getSemanticConstraints()` / `setSemanticConstraints(preset | constraints)` / `getPresetConstraints(name)` -
+  Configure bonding constraints (`default`, `octet_rule`, `hypervalent`)
+- `getSemanticRobustAlphabet()` - Symbols constrained under the current semantic constraints
 - `lenSelfies(selfies)` - Get symbol count
 - `splitSelfies(selfies)` - Split into symbols
 - `getAlphabetFromSelfies(selfies[])` - Extract unique symbols
-- `selfiesToEncoding()` / `encodingToSelfies()` - ML encodings
+- `selfiesToEncoding()` / `encodingToSelfies()` / `batchSelfiesToFlatHot()` / `batchFlatHotToSelfies()` - ML encodings
+
+With `attribute: true`, `encoder` and `decoder` return `[string, attributionMap]`, where each entry
+`{ index, token, attribution }` links an output token to the input tokens that produced it.
+
+Output matches the Python `selfies` package (v2.2); the test suite includes reference cases generated with it.
 
 ## License
 
