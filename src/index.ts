@@ -20,7 +20,7 @@
  *     const benzeneSmiles = selfies.decoder(benzeneSelfies);
  */
 
-export const version = "0.2.0";
+export const version = "0.3.0";
 
 // Core encoding/decoding functions
 export { encoder } from './encoder.js';
