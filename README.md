@@ -46,7 +46,26 @@ const symbols = [...selfies.splitSelfies(benzeneSelfies)];
 With `attribute: true`, `encoder` and `decoder` return `[string, attributionMap]`, where each entry
 `{ index, token, attribution }` links an output token to the input tokens that produced it.
 
-Output matches the Python `selfies` package (v2.2); the test suite includes reference cases generated with it.
+## Differences from Python selfies
+
+Output matches the Python `selfies` package (v2.2); the test suite includes reference cases generated
+with it. Where the Python implementation is wrong, this port fixes it instead:
+
+- **Kekulization**: Python's perfect-matching search ignores odd cycles, so for some fused ring systems it
+  returns an invalid matching or fails to kekulize. Its result is used when valid; otherwise this port
+  falls back to Edmonds' blossom algorithm.
+- **Ring numbers in SMILES output**: Python never reuses ring-closure numbers and writes `%100` and
+  above, which is not valid SMILES. Numbering is the same up to 99, after which closed numbers are reused.
+- **Multi-digit charges**: Python's encoder writes symbols such as `[Fe+10]` that its decoder rejects;
+  here they decode.
+- **Errors**: a ring bond from an atom to itself (`C11`) raises `EncoderError` (Python raises
+  `IndexError`). Rings or branches too long to express with three index symbols raise `EncoderError`
+  (Python silently writes an undecodable symbol such as `[Branch4]`).
+- **Attribution indices**: `index` is the position of the output token: the symbol index in SELFIES, the
+  starting character in SMILES. Python's indices are off for branch symbols, nested branches, multi-character
+  SMILES tokens and fragments after a `.`.
+
+Like Python, atom classes (e.g. `[CH4:1]`) are accepted but dropped.
 
 ## License
 

@@ -81,7 +81,7 @@ export function molToSmiles(
   const fragments: string[] = [];
   let attributionMaps: AttributionMap | null = attribute ? [] : null;
   let attributionIndex = 0;
-  const ringLog = new Map<string, number>();
+  const ringLog = new RingLog();
 
   for (const root of mol.getRoots()) {
     const derived: string[] = [];
@@ -100,6 +100,39 @@ export function molToSmiles(
   return [smiles, attributionMaps];
 }
 
+/**
+ * Assigns ring-closure numbers. Like the Python implementation, each ring
+ * bond gets the next unused number; but once those run out at 99, numbers of
+ * already-closed rings are reused, so the output stays valid SMILES (Python
+ * writes e.g. %100, which SMILES parsers reject).
+ */
+class RingLog {
+  private numbers = new Map<string, number>();
+  private open = new Set<number>();
+  private nextFresh = 1;
+
+  numberFor(key: string): number {
+    const existing = this.numbers.get(key);
+    if (existing !== undefined) {
+      // Second endpoint: the ring is now closed and its number is free again
+      this.numbers.delete(key);
+      this.open.delete(existing);
+      return existing;
+    }
+
+    let rnum: number;
+    if (this.nextFresh <= 99) {
+      rnum = this.nextFresh++;
+    } else {
+      rnum = 1;
+      while (this.open.has(rnum)) rnum++;
+    }
+    this.numbers.set(key, rnum);
+    this.open.add(rnum);
+    return rnum;
+  }
+}
+
 function ringNumberToSmiles(rnum: number): string {
   if (rnum < 10) return rnum.toString();
   if (rnum < 100) return `%${rnum}`;
@@ -110,7 +143,7 @@ function deriveSmilesFromFragment(
   derived: string[],
   mol: MolecularGraph,
   root: number,
-  ringLog: Map<string, number>,
+  ringLog: RingLog,
   attributionMaps: AttributionMap | null,
   attributionIndex: number
 ): void {
@@ -151,12 +184,7 @@ function deriveSmilesFromFragment(
         const token = bondToSmiles(bond);
         record(token, mol.getAttribution(bond), push(token));
         const key = `${Math.min(bond.src, bond.dst)},${Math.max(bond.src, bond.dst)}`;
-        let rnum = ringLog.get(key);
-        if (rnum === undefined) {
-          rnum = ringLog.size + 1;
-          ringLog.set(key, rnum);
-        }
-        push(ringNumberToSmiles(rnum));
+        push(ringNumberToSmiles(ringLog.numberFor(key)));
       } else {
         if (!isLast) {
           push('(');
