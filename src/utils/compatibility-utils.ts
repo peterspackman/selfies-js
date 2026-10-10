@@ -1,58 +1,53 @@
 /**
- * Backward compatibility utilities for legacy SELFIES symbols
+ * Backward compatibility utilities for legacy (<v2) SELFIES symbols
  */
 
-// Branch and Ring symbol mappings for backward compatibility
-const BRANCH_RING_UPDATES: Record<string, string> = {
-  // Branch symbols (levels 1, 2, 3)
-  '[Branch1_1]': '[Branch1]',
-  '[Branch1_2]': '[=Branch1]', 
-  '[Branch1_3]': '[#Branch1]',
-  '[Branch2_1]': '[Branch2]',
-  '[Branch2_2]': '[=Branch2]',
-  '[Branch2_3]': '[#Branch2]',
-  '[Branch3_1]': '[Branch3]',
-  '[Branch3_2]': '[=Branch3]',
-  '[Branch3_3]': '[#Branch3]',
-  
-  // Ring symbols with explicit bond orders
-  '[Expl=Ring1]': '[=Ring1]',
-  '[Expl#Ring1]': '[#Ring1]',
-  '[Expl=Ring2]': '[=Ring2]',
-  '[Expl#Ring2]': '[#Ring2]',
-  '[Expl=Ring3]': '[=Ring3]',
-  '[Expl#Ring3]': '[#Ring3]',
-  '[Expl=Ring4]': '[=Ring4]',
-  '[Expl#Ring4]': '[#Ring4]',
-  '[Expl=Ring5]': '[=Ring5]',
-  '[Expl#Ring5]': '[#Ring5]',
-  '[Expl=Ring6]': '[=Ring6]',
-  '[Expl#Ring6]': '[#Ring6]',
-  '[Expl=Ring7]': '[=Ring7]',
-  '[Expl#Ring7]': '[#Ring7]',
-  '[Expl=Ring8]': '[=Ring8]',
-  '[Expl#Ring8]': '[#Ring8]',
-  '[Expl=Ring9]': '[=Ring9]',
-  '[Expl#Ring9]': '[#Ring9]',
-};
+import { atomToSmiles } from './smiles-utils.js';
+import { smilesToAtom } from './smiles-parser.js';
+
+function buildUpdateTable(): Record<string, string> {
+  const table: Record<string, string> = {};
+  for (let L = 1; L <= 3; L++) {
+    table[`[Branch${L}_1]`] = `[Branch${L}]`;
+    table[`[Branch${L}_2]`] = `[=Branch${L}]`;
+    table[`[Branch${L}_3]`] = `[#Branch${L}]`;
+    table[`[Expl=Ring${L}]`] = `[=Ring${L}]`;
+    table[`[Expl#Ring${L}]`] = `[#Ring${L}]`;
+    table[`[Expl/Ring${L}]`] = `[//Ring${L}]`;
+    table[`[Expl\\Ring${L}]`] = `[\\\\Ring${L}]`;
+  }
+  return table;
+}
+
+const SYMBOL_UPDATE_TABLE = buildUpdateTable();
 
 /**
- * Modernizes legacy SELFIES symbols to current format
+ * Converts a SELFIES symbol from <v2 to its latest equivalent.
+ *
+ * @param symbol - an old SELFIES symbol
+ * @returns the latest equivalent of the input symbol, or the input symbol
+ *   itself if no such equivalent exists
  */
 export function modernizeSymbol(symbol: string): string {
-  // Check branch/ring updates first
-  if (BRANCH_RING_UPDATES[symbol]) {
-    return BRANCH_RING_UPDATES[symbol];
+  if (Object.prototype.hasOwnProperty.call(SYMBOL_UPDATE_TABLE, symbol)) {
+    return SYMBOL_UPDATE_TABLE[symbol];
   }
-  
-  // Handle atom symbols with 'expl' suffix
-  if (symbol.endsWith('expl]')) {
-    // Extract the part before 'expl]' and after '['
-    const atomPart = symbol.slice(1, -5); // Remove '[' and 'expl]'
-    return `[${atomPart}1]`;
+
+  if (symbol.endsWith('expl]')) { // e.g. [XXXexpl]
+    let bondChar = '';
+    let atomSymbol = symbol.slice(1, -5);
+    if ('=#/\\'.includes(symbol[1])) {
+      bondChar = symbol[1];
+      atomSymbol = symbol.slice(2, -5);
+    }
+
+    const atom = smilesToAtom(`[${atomSymbol}]`);
+    if (atom !== null && !atom.isAromatic) {
+      atomSymbol = atomToSmiles(atom, false); // standardize
+      symbol = `[${bondChar}${atomSymbol}]`;
+    }
   }
-  
-  // Return symbol unchanged if no modernization needed
+
   return symbol;
 }
 
@@ -61,8 +56,7 @@ export function modernizeSymbol(symbol: string): string {
  */
 export function warnDeprecatedCompatibility(): void {
   console.warn(
-    'SELFIES: Using backward compatibility mode is deprecated. ' +
-    'Please convert your SELFIES strings to the current format. ' +
-    'Behavior may differ from previous major releases.'
+    'SELFIES: decoder() may behave differently than in previous major ' +
+    'releases. We recommend using SELFIES that are up to date.'
   );
 }

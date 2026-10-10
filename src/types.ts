@@ -11,7 +11,11 @@ export class Attribution {
 }
 
 export interface TokenAttribution {
+  /** Position of the output token (symbol index for SELFIES, character index for SMILES) */
+  index: number;
+  /** Output token */
   token: string;
+  /** Input tokens that produced the output token */
   attribution: Attribution[];
 }
 
@@ -26,6 +30,12 @@ export type SemanticConstraints = Record<string, number>;
 // Options for encoding/decoding with attribution
 export interface AttributionOptions {
   attribute?: boolean;
+}
+
+// Options for encoding
+export interface EncoderOptions extends AttributionOptions {
+  /** If true (default), reject molecules that violate the current semantic constraints */
+  strict?: boolean;
 }
 
 // Options for decoding including backward compatibility

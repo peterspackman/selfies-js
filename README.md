@@ -30,13 +30,42 @@ const symbols = [...selfies.splitSelfies(benzeneSelfies)];
 
 ## API
 
-- `encoder(smiles)` - Convert SMILES to SELFIES
-- `decoder(selfies)` - Convert SELFIES to SMILES  
-- `setSemanticConstraints()` - Configure bonding constraints
+- `encoder(smiles, { strict?, attribute? })` - Convert SMILES to SELFIES. Aromatic SMILES are kekulized first.
+  With `strict` (default `true`) molecules violating the current semantic constraints are rejected.
+  Throws `EncoderError` for invalid or unsupported SMILES (`*`, `$`, chirality other than `@`/`@@`).
+- `decoder(selfies, { attribute?, compatible? })` - Convert SELFIES to SMILES. `compatible` accepts
+  symbols from SELFIES < v2. Throws `DecoderError` for malformed SELFIES.
+- `getSemanticConstraints()` / `setSemanticConstraints(preset | constraints)` / `getPresetConstraints(name)` -
+  Configure bonding constraints (`default`, `octet_rule`, `hypervalent`)
+- `getSemanticRobustAlphabet()` - Symbols constrained under the current semantic constraints
 - `lenSelfies(selfies)` - Get symbol count
 - `splitSelfies(selfies)` - Split into symbols
 - `getAlphabetFromSelfies(selfies[])` - Extract unique symbols
-- `selfiesToEncoding()` / `encodingToSelfies()` - ML encodings
+- `selfiesToEncoding()` / `encodingToSelfies()` / `batchSelfiesToFlatHot()` / `batchFlatHotToSelfies()` - ML encodings
+
+With `attribute: true`, `encoder` and `decoder` return `[string, attributionMap]`, where each entry
+`{ index, token, attribution }` links an output token to the input tokens that produced it.
+
+## Differences from Python selfies
+
+Output matches the Python `selfies` package (v2.2); the test suite includes reference cases generated
+with it. Where the Python implementation is wrong, this port fixes it instead:
+
+- **Kekulization**: Python's perfect-matching search ignores odd cycles, so for some fused ring systems it
+  returns an invalid matching or fails to kekulize. Its result is used when valid; otherwise this port
+  falls back to Edmonds' blossom algorithm.
+- **Ring numbers in SMILES output**: Python never reuses ring-closure numbers and writes `%100` and
+  above, which is not valid SMILES. Numbering is the same up to 99, after which closed numbers are reused.
+- **Multi-digit charges**: Python's encoder writes symbols such as `[Fe+10]` that its decoder rejects;
+  here they decode.
+- **Errors**: a ring bond from an atom to itself (`C11`) raises `EncoderError` (Python raises
+  `IndexError`). Rings or branches too long to express with three index symbols raise `EncoderError`
+  (Python silently writes an undecodable symbol such as `[Branch4]`).
+- **Attribution indices**: `index` is the position of the output token: the symbol index in SELFIES, the
+  starting character in SMILES. Python's indices are off for branch symbols, nested branches, multi-character
+  SMILES tokens and fragments after a `.`.
+
+Like Python, atom classes (e.g. `[CH4:1]`) are accepted but dropped.
 
 ## License
 

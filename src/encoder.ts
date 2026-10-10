@@ -2,143 +2,119 @@
  * SMILES to SELFIES encoder with molecular graph parsing
  */
 
-import { EncoderError } from './exceptions.js';
+import { EncoderError, SMILESParserError } from './exceptions.js';
 import { MolecularGraph, Atom, DirectedBond } from './mol-graph.js';
 import { smilesToMol } from './utils/smiles-parser.js';
 import { getSelfiesFromIndex } from './grammar-rules.js';
-import { getBondingCapacity } from './bond-constraints.js';
 import { atomToSmiles, bondToSmiles } from './utils/smiles-utils.js';
-import type { AttributionOptions, EncoderResult, AttributionMap, TokenAttribution } from './types.js';
+import type { EncoderOptions, AttributionMap } from './types.js';
 
 /**
  * Translates a SMILES string into its corresponding SELFIES string.
+ *
+ * This translation is deterministic and does not depend on the current
+ * semantic constraints. It preserves the atom order of the input SMILES.
+ * Aromatic SMILES are supported by kekulizing them before translation.
+ *
+ * Not supported: the wildcard `*`, the quadruple bond `$`, chirality other
+ * than `@`/`@@`, ring bonds across a dot, and rings or branches whose length
+ * cannot be expressed with three index symbols.
+ *
+ * @param smiles - the SMILES string to be translated
+ * @param options.strict - if true (default), throw if the molecule violates
+ *   the current semantic constraints
+ * @param options.attribute - if true, also return an attribution map
+ *   connecting SELFIES tokens to the SMILES tokens that produced them
+ * @returns the SELFIES string (or a [selfies, attributionMap] tuple if
+ *   `attribute` is true)
+ * @throws EncoderError if the SMILES is invalid, cannot be kekulized, or
+ *   violates the semantic constraints with `strict` set
  */
-export function encoder(smiles: string, options?: AttributionOptions): EncoderResult {
-  
-  // Basic validation
-  if (!smiles || typeof smiles !== 'string') {
-    throw new EncoderError("Invalid SMILES string: must be a non-empty string");
+export function encoder(smiles: string, options: EncoderOptions & { attribute: true }): [string, AttributionMap];
+export function encoder(smiles: string, options?: EncoderOptions & { attribute?: false }): string;
+export function encoder(smiles: string, options?: EncoderOptions): string | [string, AttributionMap];
+export function encoder(smiles: string, options?: EncoderOptions): string | [string, AttributionMap] {
+  if (typeof smiles !== 'string') {
+    throw new EncoderError('SMILES input must be a string');
   }
 
-  // Check for malformed SMILES patterns
-  const malformedPatterns = [
-    /^\s*$/,           // empty or whitespace only
-    /^[0-9]+$/,        // numbers only
-    /^\(/,             // starts with opening parenthesis
-    /\)$/,             // ends with closing parenthesis
-    /\([^)]*$/,        // unclosed parenthesis
-    /^[^(]*\)$/,       // unmatched closing parenthesis
-    /\*|\$/,           // wildcard or $ bond
-    /[A-Z][a-z]*@[A-Z]/,  // unrecognized chirality patterns
-  ];
+  const attribute = options?.attribute ?? false;
+  const strict = options?.strict ?? true;
 
-  for (const pattern of malformedPatterns) {
-    if (pattern.test(smiles)) {
-      throw new EncoderError(`Invalid or unsupported SMILES: ${smiles}`);
-    }
-  }
-
-  // Additional specific checks for known invalid patterns
-  const invalidSmiles = [
-    "",
-    "(",
-    "C(Cl)(Cl)CC[13C",
-    "C(CCCOC",
-    "C=(CCOC", 
-    "CCCC)",
-    "C1CCCCC",
-    "C(F)(F)(F)(F)(F)F",  // violates bond constraints
-    "C=C1=CCCCCC1",       // violates bond constraints
-    "CC*CC",              // uses wildcard
-    "C$C",                // uses $ bond
-    "S[As@TB1](F)(Cl)(Br)N", // unrecognized chirality
-    "SOMETHINGWRONGHERE",
-    "1243124124",
-  ];
-
-  if (invalidSmiles.includes(smiles)) {
-    throw new EncoderError(`Invalid or unsupported SMILES: ${smiles}`);
-  }
-
+  let mol: MolecularGraph;
   try {
-    // Parse SMILES into molecular graph
-    const mol = smilesToMol(smiles, options?.attribute || false);
-    
-    // Kekulize the molecule (convert aromatic to alternating bonds)
-    if (!mol.kekulize()) {
-      throw new EncoderError(`Kekulization failed for SMILES: ${smiles}`);
-    }
-
-    // Check bond constraints in strict mode
-    checkBondConstraints(mol, smiles);
-
-    // Handle chirality inversion for ring bonds
-    for (const atom of mol.getAtoms()) {
-      if (atom.chirality && mol.hasOutRingBond(atom.index!) && shouldInvertChirality(mol, atom)) {
-        atom.invertChirality();
-      }
-    }
-
-    // Convert molecular graph to SELFIES
-    const fragments: string[] = [];
-    const attributionMaps: AttributionMap = [];
-    let attributionIndex = 0;
-
-    for (const rootIdx of mol.getRoots()) {
-      const derived = fragmentToSelfies(mol, null, rootIdx, attributionMaps, attributionIndex);
-      attributionIndex += derived.length;
-      fragments.push(derived.join(''));
-    }
-
-    const selfiesString = fragments.join('.');
-    
-    if (options?.attribute) {
-      return [selfiesString, attributionMaps];
-    }
-
-    return selfiesString;
-
+    mol = smilesToMol(smiles, attribute);
   } catch (error) {
-    if (error instanceof EncoderError) {
-      throw error;
+    if (error instanceof SMILESParserError) {
+      throw new EncoderError(`failed to parse input\n\tSMILES: ${smiles}\n${error.message}`, error);
     }
-    throw new EncoderError(`Failed to parse SMILES: ${smiles}`);
+    throw error;
   }
+
+  if (!mol.kekulize()) {
+    throw new EncoderError(`kekulization failed\n\tSMILES: ${smiles}`);
+  }
+
+  if (strict) {
+    checkBondConstraints(mol, smiles);
+  }
+
+  // Invert chirality of atoms where necessary,
+  // such that they are restored when the SELFIES is decoded
+  for (const atom of mol.getAtoms()) {
+    if (atom.chirality !== null && mol.hasOutRingBond(atom.index!) && shouldInvertChirality(mol, atom)) {
+      atom.invertChirality();
+    }
+  }
+
+  const fragments: string[] = [];
+  let attributionMaps: AttributionMap | null = attribute ? [] : null;
+  let attributionIndex = 0;
+
+  for (const root of mol.getRoots()) {
+    const derived = fragmentToSelfies(mol, smiles, null, root, attributionMaps, attributionIndex);
+    attributionIndex += derived.length;
+    fragments.push(derived.join(''));
+  }
+
+  const selfies = fragments.join('.');
+  if (attributionMaps === null) {
+    return selfies;
+  }
+  // Trim attribution map of empty tokens
+  attributionMaps = attributionMaps.filter(a => a.token);
+  return [selfies, attributionMaps];
 }
 
 function checkBondConstraints(mol: MolecularGraph, smiles: string): void {
   const errors: string[] = [];
 
   for (const atom of mol.getAtoms()) {
+    const bondCap = atom.bondingCapacity;
     const bondCount = mol.getBondCount(atom.index!);
-    const capacity = getBondingCapacity(atom.element, atom.charge);
-    
-    if (bondCount > capacity) {
+    if (bondCount > bondCap) {
       errors.push(
-        `Atom ${atom.element} at index ${atom.index} has ${bondCount} bonds ` +
-        `but capacity is only ${capacity}`
+        `\t[${atomToSmiles(atom)} with ${bondCount} bond(s) - a max. of ${bondCap} bond(s) was specified]`
       );
     }
   }
 
   if (errors.length > 0) {
     throw new EncoderError(
-      `Bond constraint violations in SMILES: ${smiles}\n${errors.join('\n')}`
+      `input violates the currently-set semantic constraints\n` +
+      `\tSMILES: ${smiles}\n\tErrors:\n${errors.join('\n')}`
     );
   }
 }
 
 function shouldInvertChirality(mol: MolecularGraph, atom: Atom): boolean {
-  if (!atom.index) return false;
-  
-  const outBonds = mol.getOutDirBonds(atom.index);
+  const outBonds = mol.getOutDirBonds(atom.index!);
 
   // Partition bonds into 3 categories:
   // 1. rings whose right number are bonded to this atom (e.g. ...1...X1)
   // 2. rings whose left number are bonded to this atom (e.g. X1...1...)
   // 3. branches and other (e.g. X(...)...)
   const partition: number[][] = [[], [], []];
-  
   for (let i = 0; i < outBonds.length; i++) {
     const bond = outBonds[i];
     if (!bond.ringBond) {
@@ -149,14 +125,10 @@ function shouldInvertChirality(mol: MolecularGraph, atom: Atom): boolean {
       partition[0].push(i);
     }
   }
-
-  // Sort partition[1] by destination atom index for consistent ordering
   partition[1].sort((a, b) => outBonds[a].dst - outBonds[b].dst);
 
-  // Construct permutation: partition[0] + partition[1] + partition[2]
+  // Construct permutation and count its inversions
   const perm = [...partition[0], ...partition[1], ...partition[2]];
-  
-  // Count inversions in the permutation
   let count = 0;
   for (let i = 0; i < perm.length; i++) {
     for (let j = i + 1; j < perm.length; j++) {
@@ -165,128 +137,100 @@ function shouldInvertChirality(mol: MolecularGraph, atom: Atom): boolean {
       }
     }
   }
-  
-  // If odd number of inversions, should invert chirality
-  return count % 2 !== 0;
+  return count % 2 !== 0; // if odd permutation, should invert chirality
+}
+
+function indexSymbols(smiles: string, kind: string, index: number): string[] {
+  const symbols = getSelfiesFromIndex(index);
+  if (symbols.length > 3) {
+    throw new EncoderError(`${kind} is too long to be represented in SELFIES\n\tSMILES: ${smiles}`);
+  }
+  return symbols;
 }
 
 function fragmentToSelfies(
   mol: MolecularGraph,
-  bondIntoCurr: DirectedBond | null,
-  curr: number,
-  attributionMaps: AttributionMap,
+  smiles: string,
+  bondIntoRoot: DirectedBond | null,
+  root: number,
+  attributionMaps: AttributionMap | null,
   attributionIndex: number
 ): string[] {
   const derived: string[] = [];
-  
-  let currentBond = bondIntoCurr;
-  let currentAtom = curr;
-  
-  while (true) {
-    const atom = mol.getAtom(currentAtom);
-    const token = atomToSelfies(currentBond, atom);
-    derived.push(token);
-    
-    // Add attribution if needed
-    const atomAttribution = mol.getAttribution(atom);
-    if (atomAttribution) {
-      attributionMaps.push({
-        token,
-        attribution: atomAttribution
-      });
+  const record = (token: string, o: Atom | DirectedBond): void => {
+    if (attributionMaps !== null) {
+      attributionMaps.push({ index: derived.length - 1 + attributionIndex, token, attribution: mol.getAttribution(o) ?? [] });
     }
-    
-    const outBonds = mol.getOutDirBonds(currentAtom);
-    
+  };
+
+  let bondIntoCurr = bondIntoRoot;
+  let curr = root;
+
+  for (;;) {
+    const currAtom = mol.getAtom(curr);
+    const token = atomToSelfies(bondIntoCurr, currAtom);
+    derived.push(token);
+    record(token, currAtom);
+
+    const outBonds = mol.getOutDirBonds(curr);
     for (let i = 0; i < outBonds.length; i++) {
       const bond = outBonds[i];
-      
+
       if (bond.ringBond) {
-        // Only process ring closures (not openings)
         if (bond.src < bond.dst) {
           continue;
         }
-        
-        // Get the reverse bond
+
         const revBond = mol.getDirBond(bond.dst, bond.src);
         const ringLen = bond.src - bond.dst;
-        const qAsSymbols = getSelfiesFromIndex(ringLen - 1);
+        const qAsSymbols = indexSymbols(smiles, 'ring', ringLen - 1);
         const ringSymbol = `[${ringBondsToSelfies(revBond, bond)}Ring${qAsSymbols.length}]`;
-        
+
         derived.push(ringSymbol);
+        record(ringSymbol, bond);
         for (const symbol of qAsSymbols) {
           derived.push(symbol);
+          record(symbol, bond);
         }
-        
-        // Add attribution for ring
-        const bondAttribution = mol.getAttribution(bond);
-        if (bondAttribution) {
-          attributionMaps.push({
-            token: ringSymbol,
-            attribution: bondAttribution
-          });
-        }
-        
       } else if (i === outBonds.length - 1) {
-        // Last bond - continue chain
-        currentBond = bond;
-        currentAtom = bond.dst;
-        
+        bondIntoCurr = bond;
+        curr = bond.dst;
       } else {
-        // Branch
-        const branch = fragmentToSelfies(mol, bond, bond.dst, attributionMaps, derived.length);
-        const qAsSymbols = getSelfiesFromIndex(branch.length - 1);
+        // Branch tokens are recorded before the branch symbol is inserted,
+        // so shift their indices afterwards
+        const start = attributionMaps?.length ?? 0;
+        const branch = fragmentToSelfies(mol, smiles, bond, bond.dst, attributionMaps, derived.length + attributionIndex);
+        const qAsSymbols = indexSymbols(smiles, 'branch', branch.length - 1);
         const branchSymbol = `[${bondToSelfies(bond, false)}Branch${qAsSymbols.length}]`;
-        
+        const end = attributionMaps?.length ?? 0;
+
         derived.push(branchSymbol);
         for (const symbol of qAsSymbols) {
           derived.push(symbol);
+          record(symbol, bond);
         }
-        derived.push(...branch);
-        
-        // Add attribution for branch
-        const bondAttribution = mol.getAttribution(bond);
-        if (bondAttribution) {
+        for (let j = start; j < end; j++) {
+          attributionMaps![j].index += qAsSymbols.length + 1;
+        }
+        if (attributionMaps !== null) {
           attributionMaps.push({
+            index: derived.length - qAsSymbols.length - 1 + attributionIndex,
             token: branchSymbol,
-            attribution: bondAttribution
+            attribution: mol.getAttribution(bond) ?? []
           });
         }
+
+        derived.push(...branch);
       }
     }
-    
+
     // End of chain
     if (outBonds.length === 0 || outBonds[outBonds.length - 1].ringBond) {
       break;
     }
   }
-  
+
   return derived;
-}
-
-function ringBondsToSelfies(lBond: DirectedBond, rBond: DirectedBond): string {
-  // Assert that bond orders match
-  if (lBond.order !== rBond.order) {
-    throw new Error('Ring bond orders must match');
-  }
-  
-  if (lBond.order !== 1 || (lBond.stereo === null && rBond.stereo === null)) {
-    return bondToSelfies(lBond, false);
-  } else {
-    // Handle stereo bonds
-    const bondChar = (lBond.stereo || '-') + (rBond.stereo || '-');
-    return bondChar;
-  }
-}
-
-function atomToSelfies(bond: DirectedBond | null, atom: Atom): string {
-  // Assert atom is not aromatic (should be kekulized)
-  if (atom.isAromatic) {
-    throw new Error('Atom should not be aromatic after kekulization');
-  }
-  
-  const bondChar = bond ? bondToSelfies(bond, true) : '';
-  return `[${bondChar}${atomToSmiles(atom, false)}]`;
 }
 
 function bondToSelfies(bond: DirectedBond, showStereo: boolean = true): string {
@@ -294,4 +238,16 @@ function bondToSelfies(bond: DirectedBond, showStereo: boolean = true): string {
     return '';
   }
   return bondToSmiles(bond);
+}
+
+function ringBondsToSelfies(lBond: DirectedBond, rBond: DirectedBond): string {
+  if (lBond.order !== 1 || (lBond.stereo === null && rBond.stereo === null)) {
+    return bondToSelfies(lBond, false);
+  }
+  return (lBond.stereo ?? '-') + (rBond.stereo ?? '-');
+}
+
+function atomToSelfies(bond: DirectedBond | null, atom: Atom): string {
+  const bondChar = bond === null ? '' : bondToSelfies(bond);
+  return `[${bondChar}${atomToSmiles(atom, false)}]`;
 }
